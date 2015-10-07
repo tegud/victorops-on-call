@@ -1,8 +1,9 @@
 var webrequest = require('./webrequest');
-var config = require('./config/index');
+var config = require('./config');
 var debug = require('debug')('victor-ops-on-call:victoropsoncall');
 var Promise = require("bluebird");
 var _ = require('lodash');
+var moment = require('moment');
 
 var isApiSecure = config.get('victorOpsApi:isSecure') ? 'https://' : 'http://';
 var hostname = config.get('victorOpsApi:hostname');
@@ -67,6 +68,61 @@ module.exports = function(){
       });
     }
 
+    var getMatchingOverlay = function(overlays) {
+      var currentTime = moment().valueOf();
+
+      var matchingOverlays = _.filter(overlays, function(overlay) {
+        return currentTime >= overlay.start && currentTime <= overlay.end;
+      });
+
+      if(!matchingOverlays.length) {
+        return;
+      }
+
+      return _.first(matchingOverlays);
+    };
+
+    var getOnCallRotationForAllTeams = function(organisationOnCallData) {
+      return new Promise(function(resolve, reject){
+
+        if(organisationOnCallData === '' || organisationOnCallData === null){
+          reject('no oncall data was passed');
+        }
+
+        var onCall = _.reduce(organisationOnCallData, function(allTeams, team) {
+          var currentRotation = _.chain(team.oncall).filter(function(rotation) { return rotation.oncall }).first().value();
+          var allRotations =  _.sortBy(Array.prototype.concat.apply([], _.pluck(team.oncall, 'rolls')), function(rotation) {
+            return rotation.change;
+          });
+
+          allTeams[team.name] = {
+            current: currentRotation.oncall,
+            schedule: _.reduce(allRotations, function(allRotations, rotation) {
+              if(allRotations.length && allRotations[allRotations.length - 1].oncall === rotation.oncall) {
+                allRotations[allRotations.length - 1].end = moment(rotation.until).utc().format();
+
+                return allRotations;
+              }
+
+              allRotations.push({
+                oncall: rotation.oncall,
+                start: moment(rotation.change).utc().format(),
+                end: moment(rotation.until).utc().format()
+              });
+
+              return allRotations;
+            }, [])
+          };
+
+          return allTeams;
+        }, {});
+
+        resolve({
+          teams: onCall
+        });
+      });
+    }
+
     var getPeopleOnCallForAllTeams = function(organisationOnCallData) {
 
       return new Promise(function(resolve, reject){
@@ -75,12 +131,14 @@ module.exports = function(){
           reject('no oncall data was passed');
         }
 
-        var peopleOnCall = { "oncall" : []};
+        var peopleOnCall = { "oncall" : [] };
 
         _.forEach(organisationOnCallData, function(teamOnCallData){
           _.forEach(teamOnCallData.oncall, function(onCallRota){
             if('oncall' in onCallRota) {
-              peopleOnCall.oncall.push({"team" : teamOnCallData.name,"oncall" : onCallRota.oncall});
+              var override = getMatchingOverlay(teamOnCallData.overlays);
+
+              peopleOnCall.oncall.push({"team" : teamOnCallData.name,"oncall" : override ? override.over : onCallRota.oncall});
               return false;
             }
           });
@@ -114,6 +172,7 @@ module.exports = function(){
     getOnCallRotaForTeam : getOnCallRotaForTeam,
     getPersonOnCallForTeam : getPersonOnCallForTeam,
     getPeopleOnCallForAllTeams : getPeopleOnCallForAllTeams,
+    getOnCallRotationForAllTeams: getOnCallRotationForAllTeams,
     hasRotaChanged : hasRotaChanged
   };
 
